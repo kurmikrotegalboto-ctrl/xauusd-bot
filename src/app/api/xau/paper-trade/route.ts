@@ -10,6 +10,7 @@ import {
   getAccountSnapshot,
   type PaperTradeConfig,
 } from '@/lib/xau/positions'
+import { redisDel } from '@/lib/xau/redis-client'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -46,6 +47,10 @@ export async function POST(req: NextRequest) {
         break
       }
       case 'reset':
+        resetAccount()
+        break
+      case 'wipeRedis':
+        await redisDel('xauusd:paper:v1')
         resetAccount()
         break
       case 'closeAll':

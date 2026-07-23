@@ -7,6 +7,7 @@
 import type { Prediction, Signal } from './predictor'
 import { atr } from './indicators'
 import type { Candle } from './indicators'
+import { redisGet, redisSet, redisDel } from './redis-client'
 
 // ---- Types ----
 
@@ -102,6 +103,8 @@ export const DEFAULT_CONFIG: PaperTradeConfig = {
 
 // ---- Singleton store ----
 
+const REDIS_KEY = 'xauusd:paper:v1'
+
 type Store = {
   balance: number
   config: PaperTradeConfig
@@ -111,9 +114,13 @@ type Store = {
   lastEquitySample: number
   lastSignalTime: number // dedupe: don't open same side within 60s
   lastAutoTradePrice: number
+  _loaded: boolean
 }
 
-const globalForPaper = globalThis as unknown as { __xauPaper?: Store }
+const globalForPaper = globalThis as unknown as {
+  __xauPaper?: Store
+  __xauPaperLoadPromise?: Promise<void>
+}
 
 function createStore(): Store {
   return {
@@ -125,21 +132,77 @@ function createStore(): Store {
     lastEquitySample: 0,
     lastSignalTime: 0,
     lastAutoTradePrice: 0,
+    _loaded: false,
   }
 }
 
 const store: Store = globalForPaper.__xauPaper ?? createStore()
 if (!globalForPaper.__xauPaper) {
   globalForPaper.__xauPaper = store
+  // Kick off async load from Redis on first module import
+  if (!globalForPaper.__xauPaperLoadPromise) {
+    globalForPaper.__xauPaperLoadPromise = loadFromRedis()
+  }
 }
 
-// Seed initial equity point
-if (store.equityCurve.length === 0) {
-  store.equityCurve.push({
-    time: Date.now(),
-    equity: store.balance,
-    balance: store.balance,
-  })
+// Load persisted state from Redis (called once on startup)
+async function loadFromRedis(): Promise<void> {
+  const data = await redisGet<Partial<Store>>(REDIS_KEY)
+  if (data) {
+    if (typeof data.balance === 'number') store.balance = data.balance
+    if (data.config) store.config = { ...DEFAULT_CONFIG, ...data.config }
+    if (Array.isArray(data.openPositions)) store.openPositions = data.openPositions
+    if (Array.isArray(data.closedPositions)) store.closedPositions = data.closedPositions
+    if (Array.isArray(data.equityCurve)) store.equityCurve = data.equityCurve
+    if (typeof data.lastEquitySample === 'number') store.lastEquitySample = data.lastEquitySample
+    if (typeof data.lastSignalTime === 'number') store.lastSignalTime = data.lastSignalTime
+    if (typeof data.lastAutoTradePrice === 'number') store.lastAutoTradePrice = data.lastAutoTradePrice
+    console.log(`[paper] Loaded from Redis: balance=$${store.balance}, open=${store.openPositions.length}, closed=${store.closedPositions.length}`)
+  } else {
+    // Seed initial equity point if nothing in Redis
+    if (store.equityCurve.length === 0) {
+      store.equityCurve.push({
+        time: Date.now(),
+        equity: store.balance,
+        balance: store.balance,
+      })
+    }
+    console.log('[paper] No data in Redis, starting fresh')
+  }
+  store._loaded = true
+}
+
+// Debounced save (avoid spamming Redis on every tick)
+let saveTimer: NodeJS.Timeout | null = null
+let lastSaveTime = 0
+const SAVE_DEBOUNCE_MS = 3000 // save at most every 3 seconds
+
+export function saveToRedis(force = false): void {
+  const now = Date.now()
+  if (!force && now - lastSaveTime < SAVE_DEBOUNCE_MS) {
+    // Schedule a save after debounce window
+    if (!saveTimer) {
+      saveTimer = setTimeout(() => {
+        saveTimer = null
+        saveToRedis(true)
+      }, SAVE_DEBOUNCE_MS)
+    }
+    return
+  }
+  lastSaveTime = now
+  // Fire-and-forget async save
+  void (async () => {
+    await redisSet(REDIS_KEY, {
+      balance: store.balance,
+      config: store.config,
+      openPositions: store.openPositions,
+      closedPositions: store.closedPositions.slice(-500), // cap to last 500
+      equityCurve: store.equityCurve.slice(-500),
+      lastEquitySample: store.lastEquitySample,
+      lastSignalTime: store.lastSignalTime,
+      lastAutoTradePrice: store.lastAutoTradePrice,
+    })
+  })()
 }
 
 // ---- Helpers ----
@@ -324,6 +387,7 @@ export function maybeAutoOpen(prediction: Prediction | null, candles: Candle[]):
   store.openPositions.push(position)
   store.lastSignalTime = now
   store.lastAutoTradePrice = currentPrice
+  saveToRedis()
   return position
 }
 
@@ -398,6 +462,7 @@ export function checkPositions(currentPrice: number): Position[] {
     }
   }
 
+  if (justClosed.length > 0) saveToRedis()
   return justClosed
 }
 
@@ -412,6 +477,7 @@ export function sampleEquity(currentPrice: number) {
     balance: store.balance,
   })
   if (store.equityCurve.length > 500) store.equityCurve.shift()
+  saveToRedis()
 }
 
 export function closeAllManual(currentPrice: number): number {
@@ -432,6 +498,7 @@ export function closeAllManual(currentPrice: number): number {
     store.openPositions.splice(i, 1)
     count++
   }
+  if (count > 0) saveToRedis(true)
   return count
 }
 
@@ -451,6 +518,7 @@ export function closePositionManual(id: string, currentPrice: number): boolean {
   store.balance += pnl
   store.closedPositions.push(p)
   store.openPositions.splice(idx, 1)
+  saveToRedis(true)
   return true
 }
 
@@ -463,6 +531,7 @@ export function resetAccount() {
   ]
   store.lastSignalTime = 0
   store.lastAutoTradePrice = 0
+  saveToRedis(true)
 }
 
 export function deposit(amount: number) {
@@ -473,6 +542,7 @@ export function deposit(amount: number) {
     equity: store.balance + calcFloatingPnl(0),
     balance: store.balance,
   })
+  saveToRedis(true)
 }
 
 export function withdraw(amount: number): boolean {
@@ -483,6 +553,7 @@ export function withdraw(amount: number): boolean {
     equity: store.balance + calcFloatingPnl(0),
     balance: store.balance,
   })
+  saveToRedis(true)
   return true
 }
 
@@ -499,6 +570,7 @@ export function updateConfig(partial: Partial<PaperTradeConfig>) {
       { time: Date.now(), equity: store.balance, balance: store.balance },
     ]
   }
+  saveToRedis(true)
 }
 
 export function getAccountSnapshot(currentPrice: number): AccountSnapshot {
