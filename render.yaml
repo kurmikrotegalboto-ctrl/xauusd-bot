@@ -1,0 +1,28 @@
+# Render.com Blueprint — Free tier deployment for XAUUSD Bot
+# Docs: https://render.com/docs/blueprint-spec
+#
+# What you get on FREE tier:
+#   - 1 Web Service (Next.js) — 512MB RAM, sleeps after 15 min idle
+#   - 750 hours/month free compute
+#   - Automatic HTTPS, custom domain support
+#
+# For Redis, use Upstash (separate free service) — see DEPLOYMENT.md
+
+services:
+  - type: web
+    name: xauusd-bot
+    runtime: docker
+    plan: free
+    region: singapore  # change to oregon/frankfurt if closer
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/xau/paper-trade
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TWELVEDATA_API_KEY
+        sync: false  # set manually in dashboard
+      - key: REDIS_URL
+        sync: false  # set manually (from Upstash)
+      - key: PORT
+        value: 3000
