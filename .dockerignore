@@ -1,0 +1,49 @@
+# Build artifacts
+.next/
+out/
+build/
+dist/
+
+# Dependencies
+node_modules/
+.pnp
+.yarn/*
+
+# Debug logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Environment files (Railway injects its own env vars)
+.env*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Local database
+db/
+*.db
+*.db-journal
+
+# Misc
+.git/
+.gitignore
+README.md
+download/
+skills/
+examples/
+tests/
+.claude/
+.z-ai-config
+prompt
+dev.log
+server.log
+Caddyfile
