@@ -247,7 +247,7 @@ function calcStats(): PositionStats {
     winRate,
     totalPnl,
     totalRisked,
-    profitFactor: grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Infinity : 0,
+    profitFactor: grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? 99.99 : 0,
     avgWin: wins.length > 0 ? grossWin / wins.length : 0,
     avgLoss: losses.length > 0 ? grossLoss / losses.length : 0,
     bestTrade: Math.max(0, ...closed.map((p) => p.pnl ?? 0)),

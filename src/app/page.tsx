@@ -44,10 +44,10 @@ export default function Home() {
               <div className="hidden items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] sm:flex">
                 <Wallet className="h-3 w-3 text-amber-400" />
                 <span className="font-mono text-amber-300">
-                  ${data.paper.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  ${(data.paper.balance ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
-                <span className={`font-mono ${data.paper.floatingPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {data.paper.floatingPnl >= 0 ? '+' : ''}{data.paper.floatingPnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                <span className={`font-mono ${(data.paper.floatingPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {(data.paper.floatingPnl ?? 0) >= 0 ? '+' : ''}{(data.paper.floatingPnl ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
             )}

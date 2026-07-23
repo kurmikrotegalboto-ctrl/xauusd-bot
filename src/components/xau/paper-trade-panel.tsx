@@ -17,17 +17,25 @@ import { Slider } from '@/components/ui/slider'
 import { Badge } from '@/components/ui/badge'
 import type { PaperData, Position, ExitReason } from '@/hooks/use-xau-data'
 
-function fmtMoney(v: number): string {
+function fmtMoney(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '$0.00'
   const sign = v < 0 ? '-' : ''
   return `${sign}$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
-function fmtPrice(v: number): string {
+function fmtPrice(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '0.00'
   return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-function fmtPct(v: number): string {
+function fmtPct(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '+0.00%'
   return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
+}
+
+function fmtNum(v: number | null | undefined, digits = 2): string {
+  if (v == null || !Number.isFinite(v)) return '0.00'
+  return v.toFixed(digits)
 }
 
 function fmtTime(ts: number): string {
@@ -179,7 +187,7 @@ export function PaperTradePanel({ paper, currentPrice }: PaperTradePanelProps) {
             <Trophy className="h-3 w-3" /> Win Rate
           </div>
           <div className={`mt-1 font-mono text-lg font-bold ${winRateColor}`}>
-            {stats ? stats.winRate.toFixed(1) : '0.0'}%
+            {stats ? fmtNum(stats.winRate, 1) : '0.0'}%
           </div>
           <div className="text-[10px] text-muted-foreground">
             {stats ? stats.wins : 0}W / {stats ? stats.losses : 0}L
@@ -253,21 +261,21 @@ export function PaperTradePanel({ paper, currentPrice }: PaperTradePanelProps) {
       {/* Stats Grid */}
       {stats && stats.totalTrades > 0 && (
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-6">
-          <StatCard label="Total Trades" value={String(stats.totalTrades)} />
-          <StatCard label="Total P&L" value={fmtMoney(stats.totalPnl)} valueColor={stats.totalPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'} />
-          <StatCard label="Profit Factor" value={stats.profitFactor === Infinity ? '∞' : stats.profitFactor.toFixed(2)} valueColor={stats.profitFactor >= 1.5 ? 'text-emerald-400' : stats.profitFactor >= 1 ? 'text-amber-400' : 'text-rose-400'} />
-          <StatCard label="Avg R" value={`${stats.avgRMultiple >= 0 ? '+' : ''}${stats.avgRMultiple.toFixed(2)}R`} valueColor={stats.avgRMultiple >= 0 ? 'text-emerald-400' : 'text-rose-400'} />
+          <StatCard label="Total Trades" value={String(stats.totalTrades ?? 0)} />
+          <StatCard label="Total P&L" value={fmtMoney(stats.totalPnl)} valueColor={(stats.totalPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'} />
+          <StatCard label="Profit Factor" value={fmtNum(stats.profitFactor)} valueColor={(stats.profitFactor ?? 0) >= 1.5 ? 'text-emerald-400' : (stats.profitFactor ?? 0) >= 1 ? 'text-amber-400' : 'text-rose-400'} />
+          <StatCard label="Avg R" value={`${(stats.avgRMultiple ?? 0) >= 0 ? '+' : ''}${fmtNum(stats.avgRMultiple)}R`} valueColor={(stats.avgRMultiple ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'} />
           <StatCard label="Best" value={fmtMoney(stats.bestTrade)} valueColor="text-emerald-400" />
           <StatCard label="Worst" value={fmtMoney(stats.worstTrade)} valueColor="text-rose-400" />
           <StatCard label="Avg Win" value={fmtMoney(stats.avgWin)} valueColor="text-emerald-400" />
           <StatCard label="Avg Loss" value={fmtMoney(stats.avgLoss)} valueColor="text-rose-400" />
           <StatCard
             label="Streak"
-            value={stats.currentStreak === 0 ? '—' : `${stats.currentStreak > 0 ? '+' : ''}${stats.currentStreak}`}
-            valueColor={stats.currentStreak > 0 ? 'text-emerald-400' : stats.currentStreak < 0 ? 'text-rose-400' : 'text-muted-foreground'}
+            value={(stats.currentStreak ?? 0) === 0 ? '—' : `${(stats.currentStreak ?? 0) > 0 ? '+' : ''}${stats.currentStreak}`}
+            valueColor={(stats.currentStreak ?? 0) > 0 ? 'text-emerald-400' : (stats.currentStreak ?? 0) < 0 ? 'text-rose-400' : 'text-muted-foreground'}
           />
-          <StatCard label="Max Win Streak" value={String(stats.maxWinStreak)} valueColor="text-emerald-400" />
-          <StatCard label="Max Loss Streak" value={String(stats.maxLossStreak)} valueColor="text-rose-400" />
+          <StatCard label="Max Win Streak" value={String(stats.maxWinStreak ?? 0)} valueColor="text-emerald-400" />
+          <StatCard label="Max Loss Streak" value={String(stats.maxLossStreak ?? 0)} valueColor="text-rose-400" />
           <StatCard label="Total Risked" value={fmtMoney(stats.totalRisked)} />
         </div>
       )}
@@ -545,12 +553,12 @@ export function PaperTradePanel({ paper, currentPrice }: PaperTradePanelProps) {
                       <td className="py-1.5 pr-2 text-right font-mono">{p.exitPrice ? fmtPrice(p.exitPrice) : '—'}</td>
                       <td className="py-1.5 pr-2 text-right font-mono text-rose-400/70">{fmtPrice(p.stopLoss)}</td>
                       <td className="py-1.5 pr-2 text-right font-mono text-emerald-400/70">{fmtPrice(p.takeProfit)}</td>
-                      <td className="py-1.5 pr-2 text-right font-mono">{p.lotSize.toFixed(2)}</td>
+                      <td className="py-1.5 pr-2 text-right font-mono">{fmtNum(p.lotSize, 2)}</td>
                       <td className={`py-1.5 pr-2 text-right font-mono font-semibold ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                         {fmtMoney(pnl)}
                       </td>
                       <td className={`py-1.5 pr-2 text-right font-mono ${r >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {r >= 0 ? '+' : ''}{r.toFixed(2)}R
+                        {r >= 0 ? '+' : ''}{fmtNum(r)}R
                       </td>
                       <td className="py-1.5 pr-2">{exitReasonBadge(p.exitReason)}</td>
                       <td className="py-1.5 pr-2 text-right text-muted-foreground">
@@ -571,7 +579,7 @@ export function PaperTradePanel({ paper, currentPrice }: PaperTradePanelProps) {
         <div className="flex items-start gap-2">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
           <p className="text-[10px] leading-relaxed text-amber-200/80">
-            <strong className="font-semibold text-amber-300">Paper Trading:</strong> Akun ini menggunakan saldo virtual (${cfg?.startingBalance.toLocaleString()}). Posisi dibuka otomatis saat prediksi memenuhi: confidence ≥ {cfg?.minConfidence}%, agreement ≥ {cfg?.minIndicatorAgreement}/7 indikator, ATR ≥ 0.3. SL & TP dihitung dari ATR. Gunakan jurnal di atas sebagai literatur belajar trading real.
+            <strong className="font-semibold text-amber-300">Paper Trading:</strong> Akun ini menggunakan saldo virtual (${(cfg?.startingBalance ?? 0).toLocaleString()}). Posisi dibuka otomatis saat prediksi memenuhi: confidence ≥ {cfg?.minConfidence ?? 0}%, agreement ≥ {cfg?.minIndicatorAgreement ?? 0}/7 indikator, ATR ≥ 0.3. SL & TP dihitung dari ATR. Gunakan jurnal di atas sebagai literatur belajar trading real.
           </p>
         </div>
       </div>
@@ -606,7 +614,7 @@ function SettingSlider({
       <div className="mb-1.5 flex items-center justify-between">
         <label className="text-[11px] text-muted-foreground">{label}</label>
         <span className="font-mono text-[11px] text-amber-400">
-          {value.toFixed(unit === '%' || unit === 'x' ? 1 : 0)}{unit}
+          {fmtNum(value, unit === '%' || unit === 'x' ? 1 : 0)}{unit}
         </span>
       </div>
       <Slider
@@ -629,14 +637,16 @@ function OpenPositionRow({
   busy: boolean
 }) {
   const diff = p.side === 'BUY' ? currentPrice - p.entryPrice : p.entryPrice - currentPrice
-  const pnl = diff * p.lotSize * 100
-  const rPct = (pnl / p.riskAmount) * 100
-  const ageMs = Date.now() - p.openTime
+  const pnl = diff * (p.lotSize ?? 0) * 100
+  const rPct = p.riskAmount > 0 ? (pnl / p.riskAmount) * 100 : 0
+  const ageMs = Date.now() - (p.openTime ?? Date.now())
   const ageMin = Math.floor(ageMs / 60000)
   const ageSec = Math.floor((ageMs % 60000) / 1000)
 
-  const distToSl = Math.abs(currentPrice - p.stopLoss)
-  const distToTp = Math.abs(currentPrice - p.takeProfit)
+  const distToSl = Math.abs(currentPrice - (p.stopLoss ?? currentPrice))
+  const distToTp = Math.abs(currentPrice - (p.takeProfit ?? currentPrice))
+  const slDenom = Math.abs((p.entryPrice ?? 0) - (p.stopLoss ?? 0))
+  const tpDenom = Math.abs((p.entryPrice ?? 0) - (p.takeProfit ?? 0))
 
   return (
     <div className="rounded-lg border border-muted-foreground/15 bg-background/40 p-3">
@@ -651,7 +661,7 @@ function OpenPositionRow({
                   : 'border-rose-500/30 text-rose-400'
               }
             >
-              {p.side} {p.lotSize.toFixed(2)} lot
+              {p.side} {fmtNum(p.lotSize, 2)} lot
             </Badge>
             <span className="text-[10px] text-muted-foreground">
               Conf {p.confidence}% • {ageMin}m {ageSec}s
@@ -677,10 +687,10 @@ function OpenPositionRow({
           </div>
           <div className="mt-2 flex items-center gap-3 text-[10px]">
             <span className="text-muted-foreground">
-              → SL: {fmtPrice(distToSl)} ({((distToSl / Math.abs(p.entryPrice - p.stopLoss)) * 100).toFixed(0)}%)
+              → SL: {fmtPrice(distToSl)} ({slDenom > 0 ? fmtNum((distToSl / slDenom) * 100, 0) : '0'}%)
             </span>
             <span className="text-muted-foreground">
-              → TP: {fmtPrice(distToTp)} ({((distToTp / Math.abs(p.entryPrice - p.takeProfit)) * 100).toFixed(0)}%)
+              → TP: {fmtPrice(distToTp)} ({tpDenom > 0 ? fmtNum((distToTp / tpDenom) * 100, 0) : '0'}%)
             </span>
           </div>
         </div>
