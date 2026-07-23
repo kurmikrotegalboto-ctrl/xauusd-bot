@@ -40,6 +40,83 @@ export type PredictionHistoryItem = {
   resolvedAt: number | null
 }
 
+// Paper trading types (mirror of server-side positions.ts)
+export type PositionSide = 'BUY' | 'SELL'
+export type ExitReason = 'TP' | 'SL' | 'EXPIRED' | 'MANUAL'
+
+export type Position = {
+  id: string
+  side: PositionSide
+  openTime: number
+  closeTime: number | null
+  entryPrice: number
+  exitPrice: number | null
+  stopLoss: number
+  takeProfit: number
+  lotSize: number
+  riskAmount: number
+  pnl: number | null
+  pnlPct: number | null
+  exitReason: ExitReason | null
+  confidence: number
+  summary: string
+  maxFavorablePct: number
+  maxAdversePct: number
+  durationMs: number | null
+}
+
+export type PaperTradeConfig = {
+  startingBalance: number
+  riskPerTradePct: number
+  maxOpenPositions: number
+  minConfidence: number
+  minIndicatorAgreement: number
+  atrSlMultiplier: number
+  atrTpMultiplier: number
+  positionExpiryMs: number
+  autoTradeEnabled: boolean
+}
+
+export type PositionStats = {
+  totalTrades: number
+  wins: number
+  losses: number
+  winRate: number
+  totalPnl: number
+  totalRisked: number
+  profitFactor: number
+  avgWin: number
+  avgLoss: number
+  bestTrade: number
+  worstTrade: number
+  currentStreak: number
+  maxWinStreak: number
+  maxLossStreak: number
+  avgRMultiple: number
+  byExitReason: Record<ExitReason, number>
+  bySide: { BUY: number; SELL: number }
+}
+
+export type EquityPoint = {
+  time: number
+  equity: number
+  balance: number
+}
+
+export type PaperData = {
+  balance: number
+  equity: number
+  floatingPnl: number
+  freeMargin: number
+  marginUsed: number
+  openCount: number
+  config: PaperTradeConfig
+  openPositions: Position[]
+  recentClosed: Position[]
+  equityCurve: EquityPoint[]
+  stats: PositionStats
+}
+
 export type XauData = {
   connected: boolean
   price: number
@@ -51,6 +128,7 @@ export type XauData = {
   candles: Candle[]
   prediction: Prediction | null
   history: PredictionHistoryItem[]
+  paper: PaperData | null
   lastUpdate: number
 }
 
@@ -65,6 +143,7 @@ const initial: XauData = {
   candles: [],
   prediction: null,
   history: [],
+  paper: null,
   lastUpdate: 0,
 }
 
@@ -89,7 +168,6 @@ export function useXauData() {
     es.onerror = () => {
       setError('Koneksi SSE terputus, mencoba reconnect...')
       setData((d) => ({ ...d, connected: false }))
-      // EventSource will auto-reconnect; no need to manually close
     }
 
     es.onmessage = (ev) => {
@@ -108,12 +186,12 @@ export function useXauData() {
             candles: p.candles,
             prediction: p.prediction,
             history: p.history,
+            paper: p.paper ?? null,
             lastUpdate: p.serverTime,
           })
         } else if (msg.type === 'tick') {
           const p = msg.data
           setData((d) => {
-            // Update the forming (last) candle; push new candles when time changes
             const candles = [...d.candles]
             const lastCandle = candles[candles.length - 1]
             if (lastCandle && p.currentCandle.time === lastCandle.time) {
@@ -134,6 +212,7 @@ export function useXauData() {
               candles,
               prediction: p.prediction ?? d.prediction,
               history: p.history ?? d.history,
+              paper: p.paper ?? d.paper,
               lastUpdate: p.ts,
             }
           })

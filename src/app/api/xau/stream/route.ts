@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { tick, ensureStarted, snapshot } from '@/lib/xau/engine'
+import { tick, ensureStarted, snapshot, getPaperAccount } from '@/lib/xau/engine'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -14,18 +14,32 @@ function startTicker() {
     tick()
     lastTickTime = Date.now()
   }, 1000)
-  // Don't keep the process alive just for the ticker
   if (tickerInterval.unref) tickerInterval.unref()
 }
 
-// Start on first module load
 ensureStarted()
 startTicker()
+
+function buildPaperData() {
+  const acc = getPaperAccount()
+  return {
+    balance: acc.balance,
+    equity: acc.equity,
+    floatingPnl: acc.floatingPnl,
+    freeMargin: acc.freeMargin,
+    marginUsed: acc.marginUsed,
+    openCount: acc.openCount,
+    config: acc.config,
+    openPositions: acc.openPositions,
+    recentClosed: acc.recentClosed.slice(0, 20),
+    equityCurve: acc.equityCurve.slice(-200),
+    stats: acc.stats,
+  }
+}
 
 export async function GET(_req: NextRequest) {
   const s = snapshot()
 
-  // SSE stream
   const encoder = new TextEncoder()
   const stream = new ReadableStream({
     start(controller) {
@@ -47,6 +61,7 @@ export async function GET(_req: NextRequest) {
           candles: s.closedCandles.slice(-120).concat(s.currentCandle),
           prediction: s.lastPrediction,
           history: s.predictionHistory.slice(0, 12),
+          paper: buildPaperData(),
           serverTime: Date.now(),
         },
       }
@@ -73,21 +88,19 @@ export async function GET(_req: NextRequest) {
               currentCandle: current.currentCandle,
               prediction: current.lastPrediction,
               history: current.predictionHistory.slice(0, 12),
+              paper: buildPaperData(),
               ts: Date.now(),
             },
           }
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
         } catch (e) {
-          // client disconnected
           clearInterval(interval)
         }
       }, 1000)
 
-      // Cleanup on cancel
       const cancel = () => {
         clearInterval(interval)
       }
-      // ReadableStream cancel hook
       ;(controller as unknown as { cancel?: () => void }).cancel = cancel
     },
   })

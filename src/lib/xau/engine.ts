@@ -1,5 +1,12 @@
 import type { Candle } from './indicators'
 import { generatePrediction, type Prediction, type PredictionHistoryItem } from './predictor'
+import {
+  maybeAutoOpen,
+  checkPositions,
+  sampleEquity,
+  getAccountSnapshot,
+  type AccountSnapshot,
+} from './positions'
 
 // ============================================================
 // XAUUSD Price Engine — singleton, kept alive in module scope
@@ -164,16 +171,32 @@ export function tick(): State {
   updateCurrentCandle(s, s.price)
   const now = Date.now()
   const candleBucket = Math.floor(now / CANDLE_MS) * CANDLE_MS
+  let newPrediction = false
   if (candleBucket > s.lastCandleRoll) {
     rollCandle(s)
     s.lastCandleRoll = candleBucket
     if (now - s.lastPredictionTime >= PREDICTION_MS || s.lastPredictionTime === 0) {
       issuePrediction(s)
       s.lastPredictionTime = now
+      newPrediction = true
     }
   }
   resolveStalePredictions(s)
+
+  // Paper trading integration — check on every tick, dedupe handled in maybeAutoOpen
+  if (s.lastPrediction) {
+    const workingCandles = [...s.closedCandles, s.currentCandle]
+    maybeAutoOpen(s.lastPrediction, workingCandles)
+  }
+  checkPositions(s.price)
+  sampleEquity(s.price)
+
   return s
+}
+
+// Get paper trading account snapshot
+export function getPaperAccount(): AccountSnapshot {
+  return getAccountSnapshot(state.price)
 }
 
 // Get current snapshot WITHOUT ticking (for first load)
