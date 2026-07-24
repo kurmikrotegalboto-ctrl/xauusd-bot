@@ -1,156 +1,143 @@
-# XAUUSD Bot — Cara Push ke GitHub di Windows
+# XAUUSD Bot — Cara Super Simpel Push ke GitHub di Windows
 
-Ada 2 cara: **otomatis (pakai script PowerShell)** atau **manual (lebih kontrol)**.
-
----
-
-## 🚀 Cara 1: Pakai Script PowerShell (Paling Mudah)
-
-### Prasyarat
-- Windows 10 atau 11 (sudah ada PowerShell bawaan)
-- **Git for Windows** terinstall — kalau belum, download dari https://git-scm.com/download/win
-
-### Langkah
-
-1. **Download 2 file** dari folder `download/`:
-   - `xauusd-bot-bundle.tar.gz`
-   - `push-to-github.ps1`
-
-2. **Buka PowerShell** (bukan Command Prompt):
-   - Tekan `Win + R` → ketik `powershell` → Enter
-   - Atau klik kanan di folder → "Open in Terminal"
-
-3. **Pindah ke folder download** (ganti path sesuai lokasi file):
-   ```powershell
-   cd "C:\Users\pojsb\Downloads"
-   ```
-   (atau di mana pun Anda menyimpan file download-nya)
-
-4. **Jalankan script**:
-   ```powershell
-   .\push-to-github.ps1
-   ```
-
-5. **Ikuti prompt**:
-   - Masukkan GitHub username
-   - Masukkan Personal Access Token (akan tersembunyi)
-     - Bikin token di: https://github.com/settings/tokens
-     - Pilih **Generate new token (classic)** → centang **repo** → Generate
-   - Tekan Enter untuk nama repo default (`xauusd-bot`)
-
-6. **Selesai!** Script akan otomatis:
-   - Extract bundle
-   - Buat repo di GitHub
-   - Push semua kode
-
-### ⚠️ Kalau Script Gagal Jalan (Policy Restriction)
-
-PowerShell mungkin tolak script karena security policy. Fix:
-
-```powershell
-# Lihat policy saat ini:
-Get-ExecutionPolicy
-
-# Ubah ke RemoteSigned (ijinkan script lokal):
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-
-# Coba jalankan lagi:
-.\push-to-github.ps1
-```
-
-Atau bypass sementara (hanya untuk run ini):
-```powershell
-powershell -ExecutionPolicy Bypass -File .\push-to-github.ps1
-```
+**Tidak perlu PowerShell.** Cukup Command Prompt biasa + double-click.
 
 ---
 
-## ✋ Cara 2: Manual (Tanpa Script)
+## 📋 Yang Perlu Disiapkan (5 menit)
 
-Kalau script error atau Anda mau kontrol penuh:
+### 1. Install Git for Windows (kalau belum)
+- Download: https://git-scm.com/download/win
+- Install (next-next aja, default OK)
+- **Restart komputer** setelah install
 
-### Step 1: Bikin Repo di GitHub.com
-1. Buka https://github.com/new
-2. Repository name: `xauusd-bot`
-3. Pilih **Public** (atau Private terserah)
-4. **Jangan centang** "Add a README"
-5. Klik **Create repository**
+### 2. Bikin Repo Kosong di GitHub
+1. Login ke https://github.com
+2. Klik tombol **+** di kanan atas → **New repository**
+3. **Repository name**: `xauusd-bot`
+4. Pilih **Public** (atau Private terserah)
+5. **JANGAN centang** "Add a README file"
+6. Klik **Create repository**
+7. Akan muncul halaman dengan URL seperti `https://github.com/USERNAME/xauusd-bot`
 
-### Step 2: Extract Bundle
-```powershell
-# Di PowerShell, pindah ke folder download
-cd "C:\Users\pojsb\Downloads"
-
-# Extract (Windows 10+ sudah ada tar built-in)
-tar xzf xauusd-bot-bundle.tar.gz
-
-# Masuk ke folder
-cd xauusd-bot
-```
-
-### Step 3: Push ke GitHub
-Ganti `USERNAME` dengan username GitHub Anda:
-```powershell
-git remote add origin https://github.com/USERNAME/xauusd-bot.git
-git branch -M main
-git push -u origin main
-```
-
-Git akan minta login. Pakai:
-- **Username**: username GitHub
-- **Password**: Personal Access Token (BUKAN password akun GitHub!)
-  - Bikin di https://github.com/settings/tokens (classic, scope: `repo`)
-
-### Step 4: Verify
-Buka `https://github.com/USERNAME/xauusd-bot` — harus ada semua file project.
+### 3. Bikin Personal Access Token
+1. Buka https://github.com/settings/tokens
+2. Klik **Generate new token** → **Generate new token (classic)**
+3. **Note**: `xauusd-bot push`
+4. **Expiration**: 90 days
+5. **Scopes**: centang `repo` (full)
+6. Klik **Generate token** di bawah
+7. **COPY TOKEN** sekarang! (format: `ghp_xxxxxxxxxxxx...`)
+   - Token cuma muncul sekali, kalau hilang harus bikin ulang
 
 ---
 
-## 📋 Setelah Push Berhasil — Deploy Gratis ke Render
+## 🚀 Langkah Push (3 langkah simpel)
 
-1. **Buat Redis gratis di Upstash** (https://upstash.com)
-   - Sign up with GitHub
-   - Create Database → copy URL `rediss://default:PASSWORD@HOST:PORT`
+### Step 1: Download & Extract Bundle
 
-2. **Deploy ke Render** (https://render.com)
-   - Sign up with GitHub
-   - New + → Blueprint → pilih repo `xauusd-bot`
-   - render.yaml akan otomatis dipakai → klik **Apply**
+Download 2 file dari folder `download/`:
+- **`xauusd-bot-bundle.zip`** ← pakai yang ZIP ini (Windows native)
+- **`push-to-github.bat`**
 
-3. **Set Environment Variables** di Render:
-   - `REDIS_URL` = URL Upstash tadi
-   - `TWELVEDATA_API_KEY` = `2f7f8b157aee4c619ce29f293d34b1cd`
+Taruh dua file ini di folder yang sama, contoh: `C:\Users\pojsb\Downloads\xauusd\`
 
-4. **Buka URL** Render — done!
+**Extract ZIP**:
+- Klik kanan `xauusd-bot-bundle.zip` → **Extract All...** → **Extract**
+- Akan muncul folder `xauusd-bot` berisi semua kode
 
-📖 Panduan lengkap: baca `DEPLOYMENT.md` di dalam repo setelah push.
+### Step 2: Pindahkan .bat ke Folder Hasil Extract
+
+Pindahkan file `push-to-github.bat` ke DALAM folder `xauusd-bot` (hasil extract).
+
+Struktur harus jadi begini:
+```
+C:\Users\pojsb\Downloads\xauusd\
+├── xauusd-bot-bundle.zip        ← asal (boleh dihapus)
+└── xauusd-bot\                  ← hasil extract
+    ├── push-to-github.bat       ← DIPINDAHKAN KE SINI
+    ├── Dockerfile
+    ├── package.json
+    ├── render.yaml
+    ├── src\
+    └── ... (file lain)
+```
+
+### Step 3: Double-Click `push-to-github.bat`
+
+1. Buka folder `xauusd-bot` di File Explorer
+2. **Double-click** `push-to-github.bat`
+3. Akan muncul jendela hitam (Command Prompt)
+4. Ikuti prompt:
+   - Tekan Enter (setelah baca instruksi)
+   - **GitHub username**: ketik username Anda (contoh: `pojsb`)
+   - **Personal Access Token**: paste token dari Step 3 di atas
+   - **Repository name**: tekan Enter aja (default `xauusd-bot`)
+5. Tunggu proses push (10-30 detik)
+6. Lihat "PUSH BERHASIL!" — selesai!
 
 ---
 
-## 🆘 Troubleshooting Windows
+## ✅ Verify Push Berhasil
 
-**"git is not recognized"**
-- Install Git for Windows: https://git-scm.com/download/win
-- Restart PowerShell setelah install
+Buka browser ke `https://github.com/USERNAME/xauusd-bot` — harus ada semua file:
+- `Dockerfile`
+- `package.json`
+- `render.yaml`
+- folder `src/`
+- dll
 
-**"tar is not recognized"**
-- Upgrade ke Windows 10 (1803+) atau Windows 11
-- Atau pakai 7-Zip untuk extract file `.tar.gz`
+---
 
-**"curl is not recognized"**
-- Windows 10 (1803+) sudah ada curl bawaan
-- Atau pakai **Cara 2: Manual** di atas
+## 🆘 Troubleshooting
 
-**PowerShell script ditolak (policy error)**
-```powershell
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
+### "git is not recognized"
+Git belum terinstall atau belum di-add ke PATH.
+- Solusi: install Git for Windows, **restart komputer**, coba lagi
 
-**Push minta password terus, padahal sudah masukkan token**
-- Pastikan pakai **token** bukan **password akun**
-- Bikin token: https://github.com/settings/tokens (classic, scope: `repo`)
-- Token harus fresh (tidak expired)
+### "fatal: not a git repository"
+Anda menjalankan .bat di luar folder `xauusd-bot`.
+- Solusi: pastikan `push-to-github.bat` ada DI DALAM folder `xauusd-bot` (sejajar dengan `Dockerfile`, `package.json`, dll)
 
-**Push gagal dengan "Authentication failed"**
-- Token mungkin tidak punya scope `repo` — bikin ulang token
-- Atau username salah — cek case-sensitive
+### "Authentication failed" / "403 Forbidden"
+- Token salah → bikin ulang token
+- Token tidak ada scope `repo` → edit token, centang `repo`
+- Username salah (case-sensitive!)
+- Repo sudah ada isinya (bukan kosong) → hapus repo, bikin ulang yang kosong
+
+### "fatal: remote origin already exists"
+Aman, .bat otomatis handle ini. Coba jalan lagi.
+
+### Folder `xauusd-bot` tidak ada setelah extract
+- Coba pakai 7-Zip atau WinRAR kalau Windows Explorer gagal extract
+- Atau extract di folder lain
+
+### .bat tidak jalan saat di-double-click
+- Coba klik kanan → **Open**
+- Atau buka Command Prompt, cd ke folder, jalankan `push-to-github.bat`
+
+---
+
+## 📞 Kalau Masih Sulit
+
+Coba cara alternatif: **upload manual via GitHub web**
+
+1. Bikin repo kosong di GitHub (tanpa README)
+2. Extract ZIP bundle
+3. Di halaman repo GitHub yang kosong, klik **uploading an existing file**
+4. Drag & drop SEMUA file dari folder `xauusd-bot` ke browser
+5. Scroll ke bawah → **Commit changes**
+6. Selesai!
+
+Cara ini lebih lambat (harus upload manual), tapi pasti jalan tanpa script apapun.
+
+---
+
+## 🎯 Setelah Push Berhasil → Deploy ke Render
+
+Buka file **`DEPLOYMENT.md`** di dalam repo (`xauusd-bot/DEPLOYMENT.md`).
+Ikuti section "REKOMENDASI: Deploy Gratis ke Render + Upstash Redis".
+
+Atau langsung:
+1. https://upstash.com → bikin Redis gratis → copy URL
+2. https://render.com → Blueprint → pilih repo → set REDIS_URL → deploy!
