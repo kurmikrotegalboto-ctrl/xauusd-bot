@@ -1,13 +1,13 @@
 // ============================================================
-// Paper Trading System for XAUUSD Bot
-// Virtual balance + auto-open positions + P&L tracking
-// Singleton store — survives across requests in dev server
+// Paper Trading System for XAUUSD Bot — Vercel Serverless Edition
+// All state in Redis. Every operation: load → mutate → save.
+// No globalThis singletons, no in-memory cache.
 // ============================================================
 
 import type { Prediction, Signal } from './predictor'
 import { atr } from './indicators'
 import type { Candle } from './indicators'
-import { redisGet, redisSet, redisDel } from './redis-client'
+import { stateGet, stateSet, stateDel } from './redis-state'
 
 // ---- Types ----
 
@@ -23,15 +23,15 @@ export type Position = {
   exitPrice: number | null
   stopLoss: number
   takeProfit: number
-  lotSize: number // 1 lot = 100 oz
-  riskAmount: number // $ at risk if SL hit
-  pnl: number | null // realized $ P&L
-  pnlPct: number | null // % of risk (R-multiple)
+  lotSize: number
+  riskAmount: number
+  pnl: number | null
+  pnlPct: number | null
   exitReason: ExitReason | null
   confidence: number
   summary: string
-  maxFavorablePct: number // best R during life
-  maxAdversePct: number // worst R during life
+  maxFavorablePct: number
+  maxAdversePct: number
   durationMs: number | null
 }
 
@@ -43,10 +43,10 @@ export type EquityPoint = {
 
 export type PaperTradeConfig = {
   startingBalance: number
-  riskPerTradePct: number // % of balance risked per trade
+  riskPerTradePct: number
   maxOpenPositions: number
-  minConfidence: number // 0-100
-  minIndicatorAgreement: number // count of agreeing indicators
+  minConfidence: number
+  minIndicatorAgreement: number
   atrSlMultiplier: number
   atrTpMultiplier: number
   positionExpiryMs: number
@@ -60,12 +60,12 @@ export type PositionStats = {
   winRate: number
   totalPnl: number
   totalRisked: number
-  profitFactor: number // sum wins / sum losses
+  profitFactor: number
   avgWin: number
   avgLoss: number
   bestTrade: number
   worstTrade: number
-  currentStreak: number // + win streak, - loss streak
+  currentStreak: number
   maxWinStreak: number
   maxLossStreak: number
   avgRMultiple: number
@@ -87,8 +87,6 @@ export type AccountSnapshot = {
   stats: PositionStats
 }
 
-// ---- Default config ----
-
 export const DEFAULT_CONFIG: PaperTradeConfig = {
   startingBalance: 10000,
   riskPerTradePct: 1.0,
@@ -97,11 +95,11 @@ export const DEFAULT_CONFIG: PaperTradeConfig = {
   minIndicatorAgreement: 4,
   atrSlMultiplier: 1.2,
   atrTpMultiplier: 1.8,
-  positionExpiryMs: 30 * 60 * 1000, // 30 minutes
+  positionExpiryMs: 30 * 60 * 1000,
   autoTradeEnabled: true,
 }
 
-// ---- Singleton store ----
+// ---- Redis-backed store ----
 
 const REDIS_KEY = 'xauusd:paper:v1'
 
@@ -112,102 +110,63 @@ type Store = {
   closedPositions: Position[]
   equityCurve: EquityPoint[]
   lastEquitySample: number
-  lastSignalTime: number // dedupe: don't open same side within 60s
+  lastSignalTime: number
   lastAutoTradePrice: number
-  _loaded: boolean
 }
 
-const globalForPaper = globalThis as unknown as {
-  __xauPaper?: Store
-  __xauPaperLoadPromise?: Promise<void>
-}
-
-function createStore(): Store {
-  return {
+function freshStore(): Store {
+  const store: Store = {
     balance: DEFAULT_CONFIG.startingBalance,
     config: { ...DEFAULT_CONFIG },
     openPositions: [],
     closedPositions: [],
-    equityCurve: [],
+    equityCurve: [
+      { time: Date.now(), equity: DEFAULT_CONFIG.startingBalance, balance: DEFAULT_CONFIG.startingBalance },
+    ],
     lastEquitySample: 0,
     lastSignalTime: 0,
     lastAutoTradePrice: 0,
-    _loaded: false,
   }
+  return store
 }
 
-const store: Store = globalForPaper.__xauPaper ?? createStore()
-if (!globalForPaper.__xauPaper) {
-  globalForPaper.__xauPaper = store
-  // Kick off async load from Redis on first module import
-  if (!globalForPaper.__xauPaperLoadPromise) {
-    globalForPaper.__xauPaperLoadPromise = loadFromRedis()
-  }
-}
-
-// Load persisted state from Redis (called once on startup)
-async function loadFromRedis(): Promise<void> {
-  const data = await redisGet<Partial<Store>>(REDIS_KEY)
-  if (data) {
-    if (typeof data.balance === 'number') store.balance = data.balance
-    if (data.config) store.config = { ...DEFAULT_CONFIG, ...data.config }
-    if (Array.isArray(data.openPositions)) store.openPositions = data.openPositions
-    if (Array.isArray(data.closedPositions)) store.closedPositions = data.closedPositions
-    if (Array.isArray(data.equityCurve)) store.equityCurve = data.equityCurve
-    if (typeof data.lastEquitySample === 'number') store.lastEquitySample = data.lastEquitySample
-    if (typeof data.lastSignalTime === 'number') store.lastSignalTime = data.lastSignalTime
-    if (typeof data.lastAutoTradePrice === 'number') store.lastAutoTradePrice = data.lastAutoTradePrice
-    console.log(`[paper] Loaded from Redis: balance=$${store.balance}, open=${store.openPositions.length}, closed=${store.closedPositions.length}`)
-  } else {
-    // Seed initial equity point if nothing in Redis
-    if (store.equityCurve.length === 0) {
-      store.equityCurve.push({
-        time: Date.now(),
-        equity: store.balance,
-        balance: store.balance,
-      })
+async function loadStore(): Promise<Store> {
+  const data = await stateGet<Partial<Store>>(REDIS_KEY)
+  if (data && typeof data.balance === 'number') {
+    return {
+      balance: data.balance,
+      config: { ...DEFAULT_CONFIG, ...(data.config ?? {}) },
+      openPositions: Array.isArray(data.openPositions) ? data.openPositions : [],
+      closedPositions: Array.isArray(data.closedPositions) ? data.closedPositions : [],
+      equityCurve: Array.isArray(data.equityCurve) ? data.equityCurve : [],
+      lastEquitySample: typeof data.lastEquitySample === 'number' ? data.lastEquitySample : 0,
+      lastSignalTime: typeof data.lastSignalTime === 'number' ? data.lastSignalTime : 0,
+      lastAutoTradePrice: typeof data.lastAutoTradePrice === 'number' ? data.lastAutoTradePrice : 0,
     }
-    console.log('[paper] No data in Redis, starting fresh')
   }
-  store._loaded = true
+  // Fresh init
+  const fresh = freshStore()
+  await stateSet(REDIS_KEY, fresh)
+  console.log('[paper] Seeded fresh store to Redis')
+  return fresh
 }
 
-// Debounced save (avoid spamming Redis on every tick)
-let saveTimer: NodeJS.Timeout | null = null
-let lastSaveTime = 0
-const SAVE_DEBOUNCE_MS = 3000 // save at most every 3 seconds
-
-export function saveToRedis(force = false): void {
-  const now = Date.now()
-  if (!force && now - lastSaveTime < SAVE_DEBOUNCE_MS) {
-    // Schedule a save after debounce window
-    if (!saveTimer) {
-      saveTimer = setTimeout(() => {
-        saveTimer = null
-        saveToRedis(true)
-      }, SAVE_DEBOUNCE_MS)
-    }
-    return
-  }
-  lastSaveTime = now
-  // Fire-and-forget async save
-  void (async () => {
-    await redisSet(REDIS_KEY, {
-      balance: store.balance,
-      config: store.config,
-      openPositions: store.openPositions,
-      closedPositions: store.closedPositions.slice(-500), // cap to last 500
-      equityCurve: store.equityCurve.slice(-500),
-      lastEquitySample: store.lastEquitySample,
-      lastSignalTime: store.lastSignalTime,
-      lastAutoTradePrice: store.lastAutoTradePrice,
-    })
-  })()
+async function saveStore(store: Store): Promise<void> {
+  await stateSet(REDIS_KEY, {
+    balance: store.balance,
+    config: store.config,
+    openPositions: store.openPositions,
+    closedPositions: store.closedPositions.slice(-500),
+    equityCurve: store.equityCurve.slice(-500),
+    lastEquitySample: store.lastEquitySample,
+    lastSignalTime: store.lastSignalTime,
+    lastAutoTradePrice: store.lastAutoTradePrice,
+  })
 }
 
-// ---- Helpers ----
+// ---- Helpers (operate on a store instance) ----
 
-const CONTRACT_SIZE = 100 // 1 lot XAUUSD = 100 oz, $1 move = $100 per lot
+const CONTRACT_SIZE = 100
 
 function calcLotSize(balance: number, riskPct: number, slDistance: number): number {
   if (slDistance <= 0) return 0
@@ -217,44 +176,30 @@ function calcLotSize(balance: number, riskPct: number, slDistance: number): numb
   return Math.max(0.01, riskAmount / lossPerLot)
 }
 
-function calcFloatingPnl(currentPrice: number): number {
+function calcFloatingPnl(store: Store, currentPrice: number): number {
   return store.openPositions.reduce((sum, p) => {
     const diff = p.side === 'BUY' ? currentPrice - p.entryPrice : p.entryPrice - currentPrice
     return sum + diff * p.lotSize * CONTRACT_SIZE
   }, 0)
 }
 
-function calcMarginUsed(): number {
-  // Rough margin estimate: 1% of notional per lot (leverage 1:100)
+function calcMarginUsed(store: Store): number {
   return store.openPositions.reduce((sum, p) => {
     return sum + p.entryPrice * p.lotSize * CONTRACT_SIZE * 0.01
   }, 0)
 }
 
-function calcStats(): PositionStats {
+function calcStats(store: Store): PositionStats {
   const closed = store.closedPositions
   if (closed.length === 0) {
     return {
-      totalTrades: 0,
-      wins: 0,
-      losses: 0,
-      winRate: 0,
-      totalPnl: 0,
-      totalRisked: 0,
-      profitFactor: 0,
-      avgWin: 0,
-      avgLoss: 0,
-      bestTrade: 0,
-      worstTrade: 0,
-      currentStreak: 0,
-      maxWinStreak: 0,
-      maxLossStreak: 0,
-      avgRMultiple: 0,
+      totalTrades: 0, wins: 0, losses: 0, winRate: 0, totalPnl: 0, totalRisked: 0,
+      profitFactor: 0, avgWin: 0, avgLoss: 0, bestTrade: 0, worstTrade: 0,
+      currentStreak: 0, maxWinStreak: 0, maxLossStreak: 0, avgRMultiple: 0,
       byExitReason: { TP: 0, SL: 0, EXPIRED: 0, MANUAL: 0 },
       bySide: { BUY: 0, SELL: 0 },
     }
   }
-
   const wins = closed.filter((p) => (p.pnl ?? 0) > 0)
   const losses = closed.filter((p) => (p.pnl ?? 0) <= 0)
   const totalPnl = closed.reduce((s, p) => s + (p.pnl ?? 0), 0)
@@ -262,46 +207,23 @@ function calcStats(): PositionStats {
   const grossWin = wins.reduce((s, p) => s + (p.pnl ?? 0), 0)
   const grossLoss = Math.abs(losses.reduce((s, p) => s + (p.pnl ?? 0), 0))
   const winRate = (wins.length / closed.length) * 100
-  const avgRMultiple =
-    closed.reduce((s, p) => s + (p.pnlPct ?? 0), 0) / closed.length
+  const avgRMultiple = closed.reduce((s, p) => s + (p.pnlPct ?? 0), 0) / closed.length
 
-  // Streaks
   let currentStreak = 0
   for (let i = closed.length - 1; i >= 0; i--) {
     const pnl = closed[i].pnl ?? 0
-    if (pnl > 0) {
-      if (currentStreak >= 0) currentStreak++
-      else break
-    } else {
-      if (currentStreak <= 0) currentStreak--
-      else break
-    }
+    if (pnl > 0) { if (currentStreak >= 0) currentStreak++; else break }
+    else { if (currentStreak <= 0) currentStreak--; else break }
   }
-
-  let maxWinStreak = 0
-  let maxLossStreak = 0
-  let curWin = 0
-  let curLoss = 0
+  let maxWinStreak = 0, maxLossStreak = 0, curWin = 0, curLoss = 0
   for (const p of closed) {
-    if ((p.pnl ?? 0) > 0) {
-      curWin++
-      curLoss = 0
-      if (curWin > maxWinStreak) maxWinStreak = curWin
-    } else {
-      curLoss++
-      curWin = 0
-      if (curLoss > maxLossStreak) maxLossStreak = curLoss
-    }
+    if ((p.pnl ?? 0) > 0) { curWin++; curLoss = 0; if (curWin > maxWinStreak) maxWinStreak = curWin }
+    else { curLoss++; curWin = 0; if (curLoss > maxLossStreak) maxLossStreak = curLoss }
   }
-
   const byExitReason: Record<ExitReason, number> = { TP: 0, SL: 0, EXPIRED: 0, MANUAL: 0 }
-  for (const p of closed) {
-    if (p.exitReason) byExitReason[p.exitReason]++
-  }
+  for (const p of closed) { if (p.exitReason) byExitReason[p.exitReason]++ }
   const bySide = { BUY: 0, SELL: 0 }
-  for (const p of closed) {
-    bySide[p.side]++
-  }
+  for (const p of closed) { bySide[p.side]++ }
 
   return {
     totalTrades: closed.length,
@@ -324,102 +246,93 @@ function calcStats(): PositionStats {
   }
 }
 
-// ---- Public API ----
+function buildSnapshot(store: Store, currentPrice: number): AccountSnapshot {
+  const floating = calcFloatingPnl(store, currentPrice)
+  const marginUsed = calcMarginUsed(store)
+  return {
+    balance: store.balance,
+    equity: store.balance + floating,
+    floatingPnl: floating,
+    freeMargin: store.balance + floating - marginUsed,
+    marginUsed,
+    openCount: store.openPositions.length,
+    config: { ...store.config },
+    openPositions: [...store.openPositions],
+    recentClosed: store.closedPositions.slice(-30).reverse(),
+    equityCurve: [...store.equityCurve],
+    stats: calcStats(store),
+  }
+}
 
-export function maybeAutoOpen(prediction: Prediction | null, candles: Candle[]): Position | null {
+// ---- Public Async API ----
+
+export async function maybeAutoOpenAsync(
+  prediction: Prediction | null,
+  candles: Candle[],
+): Promise<Position | null> {
   if (!prediction) return null
+  const store = await loadStore()
   if (!store.config.autoTradeEnabled) return null
   if (prediction.signal === 'HOLD') return null
   if (store.openPositions.length >= store.config.maxOpenPositions) return null
-
-  // Strategy filter — confidence
   if (prediction.confidence < store.config.minConfidence) return null
 
-  // Indicator agreement
-  const agreeCount = prediction.votes.filter(
-    (v) => v.signal === prediction.signal,
-  ).length
+  const agreeCount = prediction.votes.filter((v) => v.signal === prediction.signal).length
   if (agreeCount < store.config.minIndicatorAgreement) return null
 
-  // Dedupe — don't open same side within 60 seconds
   const now = Date.now()
   if (now - store.lastSignalTime < 60 * 1000) return null
 
-  // Need ATR for SL/TP
   const atrVal = atr(candles, 14)
   if (!atrVal || atrVal < 0.3) return null
 
   const currentPrice = prediction.currentPrice
   const side: PositionSide = prediction.signal as PositionSide
-
-  // Calculate SL/TP based on ATR
   const slDistance = atrVal * store.config.atrSlMultiplier
   const tpDistance = atrVal * store.config.atrTpMultiplier
   const sl = side === 'BUY' ? currentPrice - slDistance : currentPrice + slDistance
   const tp = side === 'BUY' ? currentPrice + tpDistance : currentPrice - tpDistance
-
-  // Lot size based on risk
   const lotSize = calcLotSize(store.balance, store.config.riskPerTradePct, slDistance)
   if (lotSize < 0.01) return null
   const riskAmount = store.balance * (store.config.riskPerTradePct / 100)
 
   const position: Position = {
     id: `P-${now}-${Math.random().toString(36).slice(2, 7)}`,
-    side,
-    openTime: now,
-    closeTime: null,
-    entryPrice: currentPrice,
-    exitPrice: null,
-    stopLoss: sl,
-    takeProfit: tp,
-    lotSize,
-    riskAmount,
-    pnl: null,
-    pnlPct: null,
-    exitReason: null,
-    confidence: prediction.confidence,
-    summary: prediction.summary,
-    maxFavorablePct: 0,
-    maxAdversePct: 0,
-    durationMs: null,
+    side, openTime: now, closeTime: null,
+    entryPrice: currentPrice, exitPrice: null,
+    stopLoss: sl, takeProfit: tp,
+    lotSize, riskAmount,
+    pnl: null, pnlPct: null, exitReason: null,
+    confidence: prediction.confidence, summary: prediction.summary,
+    maxFavorablePct: 0, maxAdversePct: 0, durationMs: null,
   }
 
   store.openPositions.push(position)
   store.lastSignalTime = now
   store.lastAutoTradePrice = currentPrice
-  saveToRedis()
+  await saveStore(store)
   return position
 }
 
-export function checkPositions(currentPrice: number): Position[] {
+export async function checkPositionsAsync(currentPrice: number): Promise<Position[]> {
+  const store = await loadStore()
   const now = Date.now()
   const justClosed: Position[] = []
+  let changed = false
 
   for (let i = store.openPositions.length - 1; i >= 0; i--) {
     const p = store.openPositions[i]
     let exitPrice: number | null = null
     let reason: ExitReason | null = null
 
-    // Check SL/TP hit
     if (p.side === 'BUY') {
-      if (currentPrice <= p.stopLoss) {
-        exitPrice = p.stopLoss
-        reason = 'SL'
-      } else if (currentPrice >= p.takeProfit) {
-        exitPrice = p.takeProfit
-        reason = 'TP'
-      }
+      if (currentPrice <= p.stopLoss) { exitPrice = p.stopLoss; reason = 'SL' }
+      else if (currentPrice >= p.takeProfit) { exitPrice = p.takeProfit; reason = 'TP' }
     } else {
-      if (currentPrice >= p.stopLoss) {
-        exitPrice = p.stopLoss
-        reason = 'SL'
-      } else if (currentPrice <= p.takeProfit) {
-        exitPrice = p.takeProfit
-        reason = 'TP'
-      }
+      if (currentPrice >= p.stopLoss) { exitPrice = p.stopLoss; reason = 'SL' }
+      else if (currentPrice <= p.takeProfit) { exitPrice = p.takeProfit; reason = 'TP' }
     }
 
-    // Check expiry
     if (!exitPrice && now - p.openTime >= store.config.positionExpiryMs) {
       exitPrice = currentPrice
       reason = 'EXPIRED'
@@ -428,9 +341,8 @@ export function checkPositions(currentPrice: number): Position[] {
     if (exitPrice && reason) {
       const diff = p.side === 'BUY' ? exitPrice - p.entryPrice : p.entryPrice - exitPrice
       const pnl = diff * p.lotSize * CONTRACT_SIZE
-      const pnlPct = (pnl / p.riskAmount) * 100 // R-multiple as %
+      const pnlPct = (pnl / p.riskAmount) * 100
 
-      // Update max favorable/adverse
       const favorableDiff = p.side === 'BUY' ? currentPrice - p.entryPrice : p.entryPrice - currentPrice
       const adverseDiff = -favorableDiff
       const favorablePct = (favorableDiff * p.lotSize * CONTRACT_SIZE / p.riskAmount) * 100
@@ -444,43 +356,42 @@ export function checkPositions(currentPrice: number): Position[] {
       p.pnl = pnl
       p.pnlPct = pnlPct
       p.durationMs = now - p.openTime
-
-      // Update balance
       store.balance += pnl
-
       store.closedPositions.push(p)
       justClosed.push(p)
       store.openPositions.splice(i, 1)
+      changed = true
     } else {
-      // Update running favorable/adverse for open positions
       const favorableDiff = p.side === 'BUY' ? currentPrice - p.entryPrice : p.entryPrice - currentPrice
       const adverseDiff = -favorableDiff
       const favorablePct = (favorableDiff * p.lotSize * CONTRACT_SIZE / p.riskAmount) * 100
       const adversePct = (adverseDiff * p.lotSize * CONTRACT_SIZE / p.riskAmount) * 100
-      if (favorablePct > p.maxFavorablePct) p.maxFavorablePct = favorablePct
-      if (adversePct > p.maxAdversePct) p.maxAdversePct = adversePct
+      if (favorablePct > p.maxFavorablePct) { p.maxFavorablePct = favorablePct; changed = true }
+      if (adversePct > p.maxAdversePct) { p.maxAdversePct = adversePct; changed = true }
     }
   }
 
-  if (justClosed.length > 0) saveToRedis()
+  if (changed) await saveStore(store)
   return justClosed
 }
 
-export function sampleEquity(currentPrice: number) {
+export async function sampleEquityAsync(currentPrice: number): Promise<void> {
+  const store = await loadStore()
   const now = Date.now()
-  if (now - store.lastEquitySample < 30 * 1000) return // 30s sampling
+  if (now - store.lastEquitySample < 30 * 1000) return
   store.lastEquitySample = now
-  const floating = calcFloatingPnl(currentPrice)
+  const floating = calcFloatingPnl(store, currentPrice)
   store.equityCurve.push({
     time: now,
     equity: store.balance + floating,
     balance: store.balance,
   })
   if (store.equityCurve.length > 500) store.equityCurve.shift()
-  saveToRedis()
+  await saveStore(store)
 }
 
-export function closeAllManual(currentPrice: number): number {
+export async function closeAllManualAsync(currentPrice: number): Promise<number> {
+  const store = await loadStore()
   let count = 0
   for (let i = store.openPositions.length - 1; i >= 0; i--) {
     const p = store.openPositions[i]
@@ -498,11 +409,12 @@ export function closeAllManual(currentPrice: number): number {
     store.openPositions.splice(i, 1)
     count++
   }
-  if (count > 0) saveToRedis(true)
+  if (count > 0) await saveStore(store)
   return count
 }
 
-export function closePositionManual(id: string, currentPrice: number): boolean {
+export async function closePositionManualAsync(id: string, currentPrice: number): Promise<boolean> {
+  const store = await loadStore()
   const idx = store.openPositions.findIndex((p) => p.id === id)
   if (idx === -1) return false
   const p = store.openPositions[idx]
@@ -518,48 +430,44 @@ export function closePositionManual(id: string, currentPrice: number): boolean {
   store.balance += pnl
   store.closedPositions.push(p)
   store.openPositions.splice(idx, 1)
-  saveToRedis(true)
+  await saveStore(store)
   return true
 }
 
-export function resetAccount() {
-  store.balance = store.config.startingBalance
-  store.openPositions = []
-  store.closedPositions = []
-  store.equityCurve = [
-    { time: Date.now(), equity: store.balance, balance: store.balance },
-  ]
-  store.lastSignalTime = 0
-  store.lastAutoTradePrice = 0
-  saveToRedis(true)
+export async function resetAccountAsync(): Promise<void> {
+  const store = freshStore()
+  await saveStore(store)
 }
 
-export function deposit(amount: number) {
+export async function depositAsync(amount: number): Promise<void> {
   if (amount <= 0) return
+  const store = await loadStore()
   store.balance += amount
   store.equityCurve.push({
     time: Date.now(),
-    equity: store.balance + calcFloatingPnl(0),
+    equity: store.balance + calcFloatingPnl(store, 0),
     balance: store.balance,
   })
-  saveToRedis(true)
+  await saveStore(store)
 }
 
-export function withdraw(amount: number): boolean {
-  if (amount <= 0 || amount > store.balance) return false
+export async function withdrawAsync(amount: number): Promise<boolean> {
+  if (amount <= 0) return false
+  const store = await loadStore()
+  if (amount > store.balance) return false
   store.balance -= amount
   store.equityCurve.push({
     time: Date.now(),
-    equity: store.balance + calcFloatingPnl(0),
+    equity: store.balance + calcFloatingPnl(store, 0),
     balance: store.balance,
   })
-  saveToRedis(true)
+  await saveStore(store)
   return true
 }
 
-export function updateConfig(partial: Partial<PaperTradeConfig>) {
+export async function updateConfigAsync(partial: Partial<PaperTradeConfig>): Promise<void> {
+  const store = await loadStore()
   store.config = { ...store.config, ...partial }
-  // If startingBalance changed and no trades yet, reset balance
   if (
     partial.startingBalance !== undefined &&
     store.closedPositions.length === 0 &&
@@ -570,35 +478,24 @@ export function updateConfig(partial: Partial<PaperTradeConfig>) {
       { time: Date.now(), equity: store.balance, balance: store.balance },
     ]
   }
-  saveToRedis(true)
+  await saveStore(store)
 }
 
-export function getAccountSnapshot(currentPrice: number): AccountSnapshot {
-  const floating = calcFloatingPnl(currentPrice)
-  const marginUsed = calcMarginUsed()
-  return {
-    balance: store.balance,
-    equity: store.balance + floating,
-    floatingPnl: floating,
-    freeMargin: store.balance + floating - marginUsed,
-    marginUsed,
-    openCount: store.openPositions.length,
-    config: { ...store.config },
-    openPositions: [...store.openPositions],
-    recentClosed: store.closedPositions.slice(-30).reverse(),
-    equityCurve: [...store.equityCurve],
-    stats: calcStats(),
-  }
+export async function getAccountSnapshotAsync(currentPrice: number): Promise<AccountSnapshot> {
+  const store = await loadStore()
+  return buildSnapshot(store, currentPrice)
 }
 
-export function getOpenPositions(): Position[] {
-  return [...store.openPositions]
+export async function wipeRedisAsync(): Promise<void> {
+  await stateDel(REDIS_KEY)
 }
 
-export function getClosedPositions(limit = 50): Position[] {
-  return store.closedPositions.slice(-limit).reverse()
-}
-
-export function getConfig(): PaperTradeConfig {
-  return { ...store.config }
-}
+// ---- Backward-compat for old callers (still used by old paper-trade/route.ts) ----
+// These are DEPRECATED — use Async versions instead
+export const deposit = depositAsync
+export const withdraw = withdrawAsync
+export const resetAccount = resetAccountAsync
+export const updateConfig = updateConfigAsync
+export const closeAllManual = closeAllManualAsync
+export const closePositionManual = closePositionManualAsync
+export const getAccountSnapshot = getAccountSnapshotAsync

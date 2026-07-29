@@ -2,6 +2,12 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 
+// ============================================================
+// XAUUSD data hook — Polling-based (Vercel serverless compatible)
+// Polls /api/xau/poll every 2 seconds. Falls back to in-memory only
+// if Redis not configured (still works, just no persistence).
+// ============================================================
+
 export type Candle = {
   time: number
   open: number
@@ -27,7 +33,7 @@ export type Prediction = {
   score: number
   targetPrice: number | null
   currentPrice: number
-  timeframe: '5m'
+  timeframe: string
   validUntil: number
   votes: IndicatorVote[]
   summary: string
@@ -147,93 +153,73 @@ const initial: XauData = {
   lastUpdate: 0,
 }
 
+const POLL_INTERVAL_MS = 2000
+const RECONNECT_DELAY_MS = 5000
+
 export function useXauData() {
   const [data, setData] = useState<XauData>(initial)
   const [error, setError] = useState<string | null>(null)
-  const esRef = useRef<EventSource | null>(null)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const stoppedRef = useRef(false)
 
-  const connect = useCallback(() => {
-    if (esRef.current) {
-      esRef.current.close()
-      esRef.current = null
-    }
-    const es = new EventSource('/api/xau/stream')
-    esRef.current = es
-
-    es.onopen = () => {
-      setError(null)
-      setData((d) => ({ ...d, connected: true }))
-    }
-
-    es.onerror = () => {
-      setError('Koneksi SSE terputus, mencoba reconnect...')
-      setData((d) => ({ ...d, connected: false }))
-    }
-
-    es.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data)
-        if (msg.type === 'snapshot') {
-          const p = msg.data
-          setData({
-            connected: true,
-            price: p.price,
-            prevPrice: p.prevPrice,
-            bid: p.bid,
-            ask: p.ask,
-            spread: p.spread,
-            changePct: p.changePct,
-            candles: p.candles,
-            prediction: p.prediction,
-            history: p.history,
-            paper: p.paper ?? null,
-            lastUpdate: p.serverTime,
-          })
-        } else if (msg.type === 'tick') {
-          const p = msg.data
-          setData((d) => {
-            const candles = [...d.candles]
-            const lastCandle = candles[candles.length - 1]
-            if (lastCandle && p.currentCandle.time === lastCandle.time) {
-              candles[candles.length - 1] = p.currentCandle
-            } else if (lastCandle && p.currentCandle.time > lastCandle.time) {
-              candles.push(p.currentCandle)
-              if (candles.length > 200) candles.shift()
-            }
-            return {
-              ...d,
-              connected: true,
-              price: p.price,
-              prevPrice: p.prevPrice,
-              bid: p.bid,
-              ask: p.ask,
-              spread: p.spread,
-              changePct: p.changePct,
-              candles,
-              prediction: p.prediction ?? d.prediction,
-              history: p.history ?? d.history,
-              paper: p.paper ?? d.paper,
-              lastUpdate: p.ts,
-            }
-          })
-        }
-      } catch {
-        // ignore parse errors
+  const poll = useCallback(async () => {
+    try {
+      const res = await fetch('/api/xau/poll', {
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      })
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`)
       }
+      const p = await res.json()
+      setData({
+        connected: true,
+        price: p.price,
+        prevPrice: p.prevPrice,
+        bid: p.bid,
+        ask: p.ask,
+        spread: p.spread,
+        changePct: p.changePct,
+        candles: p.candles,
+        prediction: p.prediction,
+        history: p.history,
+        paper: p.paper ?? null,
+        lastUpdate: p.serverTime,
+      })
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Poll failed')
+      setData((d) => ({ ...d, connected: false }))
     }
   }, [])
 
-  useEffect(() => {
-    connect()
-    return () => {
-      esRef.current?.close()
-      esRef.current = null
+  const start = useCallback(() => {
+    if (timerRef.current) return
+    stoppedRef.current = false
+    poll()  // immediate first poll
+    timerRef.current = setInterval(() => {
+      if (stoppedRef.current) return
+      poll()
+    }, POLL_INTERVAL_MS)
+  }, [poll])
+
+  const stop = useCallback(() => {
+    stoppedRef.current = true
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
     }
-  }, [connect])
+  }, [])
 
   const reconnect = useCallback(() => {
-    connect()
-  }, [connect])
+    stop()
+    setTimeout(() => start(), 100)
+  }, [start, stop])
+
+  useEffect(() => {
+    start()
+    return () => stop()
+  }, [start, stop])
 
   return { data, error, reconnect }
 }

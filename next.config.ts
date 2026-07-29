@@ -1,8 +1,8 @@
 import type { NextConfig } from "next";
 
+// Vercel deployment — remove standalone output (Vercel handles build)
+// Keep ignoreBuildErrors true for safety (we have legacy deps)
 const nextConfig: NextConfig = {
-  output: "standalone",
-  /* config options here */
   typescript: {
     ignoreBuildErrors: true,
   },

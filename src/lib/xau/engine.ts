@@ -1,23 +1,25 @@
+// ============================================================
+// XAUUSD Price Engine — Vercel Serverless Edition
+// All state lives in Redis. Each poll request loads → ticks → saves.
+// No setInterval, no globalThis singletons, no in-memory state.
+// ============================================================
+
 import type { Candle } from './indicators'
 import { generatePrediction, type Prediction, type PredictionHistoryItem } from './predictor'
 import {
-  maybeAutoOpen,
-  checkPositions,
-  sampleEquity,
-  getAccountSnapshot,
+  maybeAutoOpenAsync,
+  checkPositionsAsync,
+  sampleEquityAsync,
+  getAccountSnapshotAsync,
   type AccountSnapshot,
 } from './positions'
-
-// ============================================================
-// XAUUSD Price Engine — singleton, kept alive in module scope
-// while the Next.js dev server is running. Drives price ticks,
-// 1-minute OHLC candles, and 5-minute predictions.
-// ============================================================
+import { stateGet, stateSet, withLock } from './redis-state'
 
 const BASE_PRICE = 2380.5
-const TICK_MS = 1000
 const CANDLE_MS = 60 * 1000
 const PREDICTION_MS = 5 * 60 * 1000
+const REDIS_KEY = 'xauusd:engine:v1'
+const LOCK_KEY = 'xauusd:engine:lock'
 
 type State = {
   price: number
@@ -33,6 +35,7 @@ type State = {
   predictionHistory: PredictionHistoryItem[]
   lastCandleRoll: number
   lastPredictionTime: number
+  lastTickTime: number
   started: boolean
 }
 
@@ -69,30 +72,60 @@ function seedHistory(state: State) {
   state.bid = p - state.spread / 2
   state.ask = p + state.spread / 2
   state.currentCandle = freshCandle(Math.floor(now / CANDLE_MS) * CANDLE_MS, p)
+  state.lastCandleRoll = Math.floor(now / CANDLE_MS) * CANDLE_MS
+  state.lastTickTime = now
+  state.started = true
 }
 
-// Singleton state — survives across requests in dev server
-const globalForXau = globalThis as unknown as { __xauState?: State }
-const state: State = globalForXau.__xauState ?? {
-  price: BASE_PRICE,
-  prevPrice: BASE_PRICE,
-  bid: BASE_PRICE - 0.15,
-  ask: BASE_PRICE + 0.15,
-  spread: 0.3,
-  drift: 0,
-  driftRemaining: 0,
-  currentCandle: freshCandle(0, BASE_PRICE),
-  closedCandles: [],
-  lastPrediction: null,
-  predictionHistory: [],
-  lastCandleRoll: 0,
-  lastPredictionTime: 0,
-  started: false,
+function freshState(): State {
+  const base: State = {
+    price: BASE_PRICE,
+    prevPrice: BASE_PRICE,
+    bid: BASE_PRICE - 0.15,
+    ask: BASE_PRICE + 0.15,
+    spread: 0.3,
+    drift: 0,
+    driftRemaining: 0,
+    currentCandle: freshCandle(0, BASE_PRICE),
+    closedCandles: [],
+    lastPrediction: null,
+    predictionHistory: [],
+    lastCandleRoll: 0,
+    lastPredictionTime: 0,
+    lastTickTime: 0,
+    started: false,
+  }
+  seedHistory(base)
+  // Issue first prediction immediately
+  const workingCandles = [...base.closedCandles, base.currentCandle]
+  const pred = generatePrediction(workingCandles)
+  if (pred) {
+    base.lastPrediction = pred
+    base.predictionHistory.unshift({
+      prediction: pred,
+      actualChangePct: null,
+      resolved: false,
+      resolvedAt: null,
+    })
+    base.lastPredictionTime = Date.now()
+  }
+  return base
 }
-if (!globalForXau.__xauState) {
-  globalForXau.__xauState = state
-  seedHistory(state)
-  state.lastCandleRoll = Math.floor(Date.now() / CANDLE_MS) * CANDLE_MS
+
+async function loadState(): Promise<State> {
+  const data = await stateGet<State>(REDIS_KEY)
+  if (data && typeof data.price === 'number') {
+    return data
+  }
+  // Initialize fresh
+  const fresh = freshState()
+  await stateSet(REDIS_KEY, fresh)
+  console.log('[engine] Seeded fresh state to Redis')
+  return fresh
+}
+
+async function saveState(state: State): Promise<void> {
+  await stateSet(REDIS_KEY, state)
 }
 
 function nextPrice(s: State): number {
@@ -163,54 +196,85 @@ function resolveStalePredictions(s: State) {
   }
 }
 
-// Tick function — called by SSE route on each client poll interval
-// Returns the latest snapshot
-export function tick(): State {
-  const s = state
-  nextPrice(s)
-  updateCurrentCandle(s, s.price)
-  const now = Date.now()
-  const candleBucket = Math.floor(now / CANDLE_MS) * CANDLE_MS
-  let newPrediction = false
-  if (candleBucket > s.lastCandleRoll) {
-    rollCandle(s)
-    s.lastCandleRoll = candleBucket
-    if (now - s.lastPredictionTime >= PREDICTION_MS || s.lastPredictionTime === 0) {
-      issuePrediction(s)
-      s.lastPredictionTime = now
-      newPrediction = true
+export type EngineSnapshot = {
+  price: number
+  prevPrice: number
+  bid: number
+  ask: number
+  spread: number
+  changePct: number
+  candles: Candle[]
+  prediction: Prediction | null
+  history: PredictionHistoryItem[]
+  paper: AccountSnapshot | null
+  serverTime: number
+}
+
+function buildSnapshot(s: State, paper: AccountSnapshot | null): EngineSnapshot {
+  return {
+    price: s.price,
+    prevPrice: s.prevPrice,
+    bid: s.bid,
+    ask: s.ask,
+    spread: s.spread,
+    changePct:
+      s.closedCandles.length > 0
+        ? ((s.price - s.closedCandles[s.closedCandles.length - 1].open) /
+            s.closedCandles[s.closedCandles.length - 1].open) * 100
+        : 0,
+    candles: s.closedCandles.slice(-120).concat(s.currentCandle),
+    prediction: s.lastPrediction,
+    history: s.predictionHistory.slice(0, 12),
+    paper,
+    serverTime: Date.now(),
+  }
+}
+
+// ---- Public async API ----
+
+/**
+ * Tick the engine and return current snapshot.
+ * Acquires a distributed lock to prevent concurrent ticks.
+ * If lock unavailable, returns current state without ticking.
+ */
+export async function tickAsync(): Promise<EngineSnapshot> {
+  return withLock(LOCK_KEY, async () => {
+    const s = await loadState()
+    nextPrice(s)
+    updateCurrentCandle(s, s.price)
+    const now = Date.now()
+    const candleBucket = Math.floor(now / CANDLE_MS) * CANDLE_MS
+    if (candleBucket > s.lastCandleRoll) {
+      rollCandle(s)
+      s.lastCandleRoll = candleBucket
+      if (now - s.lastPredictionTime >= PREDICTION_MS || s.lastPredictionTime === 0) {
+        issuePrediction(s)
+        s.lastPredictionTime = now
+      }
     }
-  }
-  resolveStalePredictions(s)
+    resolveStalePredictions(s)
+    s.lastTickTime = now
+    await saveState(s)
 
-  // Paper trading integration — check on every tick, dedupe handled in maybeAutoOpen
-  if (s.lastPrediction) {
-    const workingCandles = [...s.closedCandles, s.currentCandle]
-    maybeAutoOpen(s.lastPrediction, workingCandles)
-  }
-  checkPositions(s.price)
-  sampleEquity(s.price)
+    // Paper trading integration (uses same lock context)
+    if (s.lastPrediction) {
+      const workingCandles = [...s.closedCandles, s.currentCandle]
+      await maybeAutoOpenAsync(s.lastPrediction, workingCandles)
+    }
+    await checkPositionsAsync(s.price)
+    await sampleEquityAsync(s.price)
 
-  return s
+    const paper = await getAccountSnapshotAsync(s.price)
+    return buildSnapshot(s, paper)
+  })
 }
 
-// Get paper trading account snapshot
-export function getPaperAccount(): AccountSnapshot {
-  return getAccountSnapshot(state.price)
-}
-
-// Get current snapshot WITHOUT ticking (for first load)
-export function snapshot() {
-  return state
-}
-
-// Issue first prediction if needed (called on first SSE connect)
-export function ensureStarted() {
-  const s = state
-  if (s.lastPredictionTime === 0) {
-    issuePrediction(s)
-    s.lastPredictionTime = Date.now()
-  }
+/**
+ * Get current snapshot WITHOUT ticking (for paper-trade POST endpoints).
+ * Still ticks once to ensure fresh price data.
+ */
+export async function getSnapshotAsync(): Promise<EngineSnapshot> {
+  return tickAsync()
 }
 
 export type { Prediction, PredictionHistoryItem }

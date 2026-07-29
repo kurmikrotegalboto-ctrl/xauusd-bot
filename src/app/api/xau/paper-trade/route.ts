@@ -1,32 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { snapshot } from '@/lib/xau/engine'
+import { tickAsync } from '@/lib/xau/engine'
 import {
-  deposit,
-  withdraw,
-  resetAccount,
-  updateConfig,
-  closeAllManual,
-  closePositionManual,
-  getAccountSnapshot,
+  depositAsync,
+  withdrawAsync,
+  resetAccountAsync,
+  updateConfigAsync,
+  closeAllManualAsync,
+  closePositionManualAsync,
+  getAccountSnapshotAsync,
+  wipeRedisAsync,
   type PaperTradeConfig,
 } from '@/lib/xau/positions'
-import { redisDel } from '@/lib/xau/redis-client'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
+export const maxDuration = 30
 
+// GET — returns current account snapshot (also ticks once for fresh price)
 export async function GET() {
-  const s = snapshot()
-  const acc = getAccountSnapshot(s.price)
-  return NextResponse.json(acc)
+  try {
+    const snapshot = await tickAsync()
+    return NextResponse.json(snapshot.paper, {
+      headers: { 'Cache-Control': 'no-store' },
+    })
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : 'Unknown error' },
+      { status: 500 },
+    )
+  }
 }
 
+// POST — perform an action on the paper trading account
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { action } = body as { action: string; [k: string]: unknown }
-    const s = snapshot()
-    const price = s.price
+    const action = body.action as string
+
+    // Tick first to get fresh price
+    const snap = await tickAsync()
+    const price = snap.price
 
     switch (action) {
       case 'deposit': {
@@ -34,7 +47,7 @@ export async function POST(req: NextRequest) {
         if (!Number.isFinite(amount) || amount <= 0) {
           return NextResponse.json({ error: 'Invalid amount' }, { status: 400 })
         }
-        deposit(amount)
+        await depositAsync(amount)
         break
       }
       case 'withdraw': {
@@ -42,23 +55,22 @@ export async function POST(req: NextRequest) {
         if (!Number.isFinite(amount) || amount <= 0) {
           return NextResponse.json({ error: 'Invalid amount' }, { status: 400 })
         }
-        const ok = withdraw(amount)
+        const ok = await withdrawAsync(amount)
         if (!ok) return NextResponse.json({ error: 'Insufficient balance' }, { status: 400 })
         break
       }
       case 'reset':
-        resetAccount()
+        await resetAccountAsync()
         break
       case 'wipeRedis':
-        await redisDel('xauusd:paper:v1')
-        resetAccount()
+        await wipeRedisAsync()
         break
       case 'closeAll':
-        closeAllManual(price)
+        await closeAllManualAsync(price)
         break
       case 'closeOne': {
         const id = String(body.id ?? '')
-        const ok = closePositionManual(id, price)
+        const ok = await closePositionManualAsync(id, price)
         if (!ok) return NextResponse.json({ error: 'Position not found' }, { status: 404 })
         break
       }
@@ -88,14 +100,14 @@ export async function POST(req: NextRequest) {
             }
           }
         }
-        updateConfig(partial)
+        await updateConfigAsync(partial)
         break
       }
       default:
         return NextResponse.json({ error: 'Unknown action' }, { status: 400 })
     }
 
-    const acc = getAccountSnapshot(price)
+    const acc = await getAccountSnapshotAsync(price)
     return NextResponse.json({ ok: true, account: acc })
   } catch (e) {
     return NextResponse.json(
