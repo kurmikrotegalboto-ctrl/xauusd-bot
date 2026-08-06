@@ -430,11 +430,76 @@ export class GoldApiProvider implements PriceProvider {
 }
 
 // ============================================================
+// Provider 5: Gold-API.com (FREE — no API key, no registration)
+// - Public endpoint: https://api.gold-api.com/price/XAU
+// - Returns: { price, currency, updatedAt }
+// - No rate limit documented, but we cache 30s in Redis to be safe
+// - Used as DEFAULT when no other paid provider key is set
+// ============================================================
+
+export class GoldApiFreeProvider implements PriceProvider {
+  name = 'Gold-API (Free)'
+  private callsToday = 0
+  private lastFetch: number | null = null
+  private lastError: string | null = null
+
+  async fetchPrice(_symbol: string) {
+    const url = 'https://api.gold-api.com/price/XAU'
+    try {
+      const res = await fetch(url, {
+        cache: 'no-store',
+        headers: { 'User-Agent': 'XAUUSD-Bot/1.0' },
+        signal: AbortSignal.timeout(4000),  // 4s timeout — don't block poll
+      })
+      this.lastFetch = Date.now()
+      this.callsToday++
+      if (!res.ok) {
+        this.lastError = `HTTP ${res.status}`
+        return null
+      }
+      const json = await res.json()
+      if (!json.price || typeof json.price !== 'number') {
+        this.lastError = 'No price in response'
+        return null
+      }
+      this.lastError = null
+      return {
+        price: json.price as number,
+        timestamp: json.updatedAt ? new Date(json.updatedAt).getTime() : Date.now(),
+      }
+    } catch (e) {
+      this.lastError = (e as Error).message
+      return null
+    }
+  }
+
+  async fetchCandles(): Promise<Candle[] | null> {
+    // Gold-API.com doesn't provide historical candles — engine uses simulation for candle history
+    this.lastError = 'Gold-API free tier does not provide historical candles'
+    return null
+  }
+
+  getInfo(): ProviderInfo {
+    return {
+      name: this.name,
+      mode: 'live',
+      symbol: 'XAU/USD',
+      interval: '30s cached',
+      lastFetch: this.lastFetch,
+      lastError: this.lastError,
+      callsToday: this.callsToday,
+      callsLimit: null,  // no documented limit
+    }
+  }
+}
+
+// ============================================================
 // Factory: read env vars and return the configured provider
-// Falls back to null (simulation) if no key is set
+// Falls back to GoldApiFreeProvider (no key needed) for real prices
 // ============================================================
 
 export function createProvider(): PriceProvider | null {
+  // Priority 1: Paid providers with API keys (better data)
   if (process.env.TWELVEDATA_API_KEY) {
     return new TwelveDataProvider(process.env.TWELVEDATA_API_KEY)
   }
@@ -447,7 +512,8 @@ export function createProvider(): PriceProvider | null {
   if (process.env.GOLDAPI_API_KEY) {
     return new GoldApiProvider(process.env.GOLDAPI_API_KEY)
   }
-  return null
+  // Priority 2: Free provider (no key, real-time spot price)
+  return new GoldApiFreeProvider()
 }
 
 export type ConfiguredProvider = {

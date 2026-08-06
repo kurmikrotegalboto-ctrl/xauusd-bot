@@ -14,10 +14,13 @@ import {
   type AccountSnapshot,
 } from './positions'
 import { stateGet, stateSet, withLock } from './redis-state'
+import { createProvider, type PriceProvider, type ProviderInfo } from './providers'
 
-const BASE_PRICE = 2380.5
+const BASE_PRICE = 2380.5  // fallback only if real price fetch fails on cold start
 const CANDLE_MS = 60 * 1000
 const PREDICTION_MS = 5 * 60 * 1000
+const REAL_PRICE_TTL_MS = 30 * 1000  // fetch real price at most every 30s
+const PRICE_CACHE_KEY = 'xauusd:realprice:v1'
 const REDIS_KEY = 'xauusd:engine:v1'
 const LOCK_KEY = 'xauusd:engine:lock'
 
@@ -37,6 +40,11 @@ type State = {
   lastPredictionTime: number
   lastTickTime: number
   started: boolean
+  // Real price tracking
+  realPrice: number | null  // last fetched real price from API
+  realPriceAt: number  // timestamp when realPrice was fetched
+  realPriceSource: string  // provider name (for UI display)
+  realPriceError: string | null  // last error from real price fetch
 }
 
 function freshCandle(time: number, price: number): Candle {
@@ -94,6 +102,10 @@ function freshState(): State {
     lastPredictionTime: 0,
     lastTickTime: 0,
     started: false,
+    realPrice: null,
+    realPriceAt: 0,
+    realPriceSource: 'simulation',
+    realPriceError: null,
   }
   seedHistory(base)
   // Issue first prediction immediately
@@ -128,6 +140,9 @@ async function saveState(state: State): Promise<void> {
   await stateSet(REDIS_KEY, state)
 }
 
+// Mean-reverting random walk toward real price (anchored).
+// If realPrice is set, price will gradually drift toward it.
+// Between fetches, micro-ticks provide realistic movement.
 function nextPrice(s: State): number {
   const vol = 0.45
   if (s.driftRemaining <= 0) {
@@ -145,8 +160,19 @@ function nextPrice(s: State): number {
   if (Math.random() < 0.004) {
     next += (Math.random() - 0.5) * 6
   }
-  if (next < 1500) next = 1500
-  if (next > 3500) next = 3500
+
+  // Mean reversion: pull price toward realPrice (if known & fresh)
+  if (s.realPrice && s.realPrice > 0) {
+    const ageMs = Date.now() - s.realPriceAt
+    // Stronger pull when realPrice is fresh, weaker as it ages
+    const reversionStrength = Math.max(0, 0.15 * (1 - ageMs / (5 * 60 * 1000)))
+    const gap = s.realPrice - next
+    next += gap * reversionStrength
+  }
+
+  // Wide bounds — real XAUUSD can range $1000–$5000+
+  if (next < 1000) next = 1000
+  if (next > 6000) next = 6000
   s.prevPrice = s.price
   s.price = next
   s.bid = next - s.spread / 2
@@ -208,6 +234,12 @@ export type EngineSnapshot = {
   history: PredictionHistoryItem[]
   paper: AccountSnapshot | null
   serverTime: number
+  // Real price metadata for UI display
+  realPrice: number | null
+  realPriceAt: number | null
+  realPriceSource: string
+  realPriceError: string | null
+  realPriceAgeMs: number | null
 }
 
 function buildSnapshot(s: State, paper: AccountSnapshot | null): EngineSnapshot {
@@ -227,10 +259,100 @@ function buildSnapshot(s: State, paper: AccountSnapshot | null): EngineSnapshot 
     history: s.predictionHistory.slice(0, 12),
     paper,
     serverTime: Date.now(),
+    realPrice: s.realPrice,
+    realPriceAt: s.realPriceAt ? s.realPriceAt : null,
+    realPriceSource: s.realPriceSource,
+    realPriceError: s.realPriceError,
+    realPriceAgeMs: s.realPriceAt ? Date.now() - s.realPriceAt : null,
   }
 }
 
-// ---- Public async API ----
+// ---- Real price fetching (cached in Redis) ----
+
+let _provider: PriceProvider | null | undefined
+function getProvider(): PriceProvider | null {
+  if (_provider === undefined) {
+    _provider = createProvider()
+    if (_provider) {
+      console.log(`[engine] Price provider: ${_provider.name}`)
+    } else {
+      console.log('[engine] No price provider configured — using simulation only')
+    }
+  }
+  return _provider
+}
+
+type CachedPrice = {
+  price: number
+  timestamp: number
+  source: string
+  error: string | null
+}
+
+async function getCachedRealPrice(): Promise<CachedPrice | null> {
+  return stateGet<CachedPrice>(PRICE_CACHE_KEY)
+}
+
+async function setCachedRealPrice(c: CachedPrice): Promise<void> {
+  // TTL 5 minutes — old data is better than no data
+  await stateSet(PRICE_CACHE_KEY, c, 300)
+}
+
+async function fetchRealPriceIfNeeded(s: State): Promise<void> {
+  const provider = getProvider()
+  if (!provider) {
+    s.realPriceSource = 'simulation'
+    return
+  }
+
+  const now = Date.now()
+  const ageMs = s.realPriceAt ? now - s.realPriceAt : Infinity
+  if (ageMs < REAL_PRICE_TTL_MS && s.realPrice) {
+    // Still fresh — no fetch needed
+    return
+  }
+
+  // Check shared cache first (multiple serverless instances share Redis)
+  const cached = await getCachedRealPrice()
+  if (cached && now - cached.timestamp < REAL_PRICE_TTL_MS) {
+    s.realPrice = cached.price
+    s.realPriceAt = cached.timestamp
+    s.realPriceSource = cached.source
+    s.realPriceError = cached.error
+    return
+  }
+
+  // Fetch fresh from provider (with timeout)
+  try {
+    const result = await provider.fetchPrice('XAU/USD')
+    if (result && typeof result.price === 'number' && result.price > 0) {
+      s.realPrice = result.price
+      s.realPriceAt = result.timestamp || now
+      s.realPriceSource = provider.name
+      s.realPriceError = null
+      await setCachedRealPrice({
+        price: result.price,
+        timestamp: s.realPriceAt,
+        source: s.realPriceSource,
+        error: null,
+      })
+      console.log(`[engine] Fetched real price: $${result.price} from ${provider.name}`)
+    } else {
+      // Provider returned null (error) — keep last known real price if any
+      s.realPriceSource = provider.name
+      s.realPriceError = provider.getInfo().lastError
+      // If we never had a real price, snap to it on first failure (cold start)
+      if (!s.realPrice && cached) {
+        s.realPrice = cached.price
+        s.realPriceAt = cached.timestamp
+        s.realPriceSource = cached.source
+      }
+    }
+  } catch (e) {
+    s.realPriceError = (e as Error).message
+    console.error('[engine] Real price fetch error:', s.realPriceError)
+  }
+}
 
 /**
  * Tick the engine and return current snapshot.
@@ -240,6 +362,24 @@ function buildSnapshot(s: State, paper: AccountSnapshot | null): EngineSnapshot 
 export async function tickAsync(): Promise<EngineSnapshot> {
   return withLock(LOCK_KEY, async () => {
     const s = await loadState()
+    
+    // Fetch real price (cached, no-op if fresh) BEFORE ticking
+    // so mean-reversion uses the latest anchor
+    await fetchRealPriceIfNeeded(s)
+    
+    // On cold start with real price fetched, snap immediately
+    if (s.realPrice && s.realPriceAt && !s.started && s.price === BASE_PRICE) {
+      const diff = Math.abs(s.price - s.realPrice)
+      if (diff > 50) {  // only snap if simulation is way off
+        console.log(`[engine] Cold start snap: $${s.price} → $${s.realPrice}`)
+        s.price = s.realPrice
+        s.prevPrice = s.realPrice
+        s.bid = s.realPrice - s.spread / 2
+        s.ask = s.realPrice + s.spread / 2
+        s.currentCandle = freshCandle(Math.floor(Date.now() / CANDLE_MS) * CANDLE_MS, s.realPrice)
+      }
+    }
+    
     nextPrice(s)
     updateCurrentCandle(s, s.price)
     const now = Date.now()
